@@ -2,56 +2,86 @@
 #include <Wire.h>            
 #include <vl53l4cd_class.h>  
 
-// Define the pins used for the I2C bus on the ACEBOTT ESP32
 #define SDA_PIN 21           
 #define SCL_PIN 22           
 #define MUX_ADDR 0x70        
 
-// adress for motor 
+// --- MATCH USB SPEED ---
+// 70 on Battery (7.4V) feels like 100 on USB (5V)
+#define MOTOR_SPEED 70
+
+// Motor Pins
 #define INT1 16
 #define INT2 17
 #define INT3 18
 #define INT4 19
 
-// --- NEW SPEED SETTING ---
-// 100 on USB (5V) is roughly equal to 70 on Battery (7.4V)
-// This makes the motors spin at the "USB Speed" even on battery.
-#define MOTOR_SPEED 70  
-
 VL53L4CD sensor(&Wire, -1); 
 
+// Helper to switch Mux
 void selectMuxChannel(uint8_t channel) {
   Wire.beginTransmission(MUX_ADDR);  
   Wire.write(1 << channel);          
   Wire.endTransmission();            
-  delay(5);                          
+  delay(10); // Increased delay slightly for stability
+}
+
+// MOVEMENT FUNCTIONS (Defined early so Setup can use them)
+void stop() {
+  analogWrite(INT1, 0); analogWrite(INT2, 0);
+  analogWrite(INT3, 0); analogWrite(INT4, 0);
+}
+
+void forward() {
+  analogWrite(INT1, MOTOR_SPEED); analogWrite(INT2, 0); 
+  analogWrite(INT3, 0);           analogWrite(INT4, MOTOR_SPEED);
+}
+
+void right() { 
+  analogWrite(INT1, MOTOR_SPEED); analogWrite(INT2, 0); 
+  analogWrite(INT3, MOTOR_SPEED); analogWrite(INT4, 0);
+  delay(600); // Tuned for battery speed
+}
+
+void left() {  
+  analogWrite(INT1, 0);           analogWrite(INT2, MOTOR_SPEED); 
+  analogWrite(INT3, 0);           analogWrite(INT4, MOTOR_SPEED); 
+  delay(600); // Tuned for battery speed
 }
 
 void setup() {
-  // 1. FIX STARTUP GLITCH
+  // 1. CRITICAL: STOP MOTORS FIRST
+  // This prevents voltage drops from killing the sensors during boot
+  pinMode(INT1, OUTPUT); pinMode(INT2, OUTPUT); 
+  pinMode(INT3, OUTPUT); pinMode(INT4, OUTPUT); 
+  stop(); 
+
+  // 2. WAIT FOR BATTERY TO STABILIZE
   delay(3000);                       
 
   Serial.begin(115200);              
-  delay(2000);                       
-
   Wire.begin(SDA_PIN, SCL_PIN);      
   Wire.setClock(100000);             
 
+  // 3. ROBUST SENSOR INIT (RETRY LOGIC)
   for (uint8_t i = 0; i < 3; i++) {
     selectMuxChannel(i);             
-    if (sensor.begin() == 0 && sensor.InitSensor() == 0) {
-      sensor.VL53L4CD_StartRanging(); 
+    
+    // Try to start the sensor 5 times before giving up
+    for (int attempt = 0; attempt < 5; attempt++) {
+      if (sensor.begin() == 0 && sensor.InitSensor() == 0) {
+        sensor.VL53L4CD_StartRanging(); 
+        break; // It worked! Move to next sensor
+      }
+      delay(50); // Wait a bit and try again
     }
   }
-  pinMode(INT1, OUTPUT); 
-  pinMode(INT2, OUTPUT); 
-  pinMode(INT3, OUTPUT); 
-  pinMode(INT4, OUTPUT); 
 }
 
 void loop() {
   uint16_t dists[3] = {0, 0, 0};     
 
+  // 1. READ DATA
   for (uint8_t i = 0; i < 3; i++) {
     selectMuxChannel(i);             
     
@@ -62,27 +92,27 @@ void loop() {
 
     if (isReady) {
       sensor.VL53L4CD_GetResult(&results);  
-      dists[i] = results.distance_mm;       
+      // FILTER: If sensor fails (Status != 0), pretend it's open space (2000mm)
+      // This prevents the "Run away" bug if a sensor disconnects
+      if (results.range_status == 0) {
+        dists[i] = results.distance_mm;
+      } else {
+        dists[i] = 2000; 
+      }
       sensor.VL53L4CD_ClearInterrupt();     
     }
   }
   
-  // PRINTING DATA 
-  Serial.print("Left_S0:");          
-  Serial.print(dists[2]);            
-  Serial.print(",");                 
+  // 2. DEBUG PRINTING
+  Serial.print("Left_S0:"); Serial.print(dists[2]); Serial.print(",");
+  Serial.print("Center_S1:"); Serial.print(dists[1]); Serial.print(",");
+  Serial.print("Right_S2:"); Serial.print(dists[0]); Serial.println();
   
-  Serial.print("Center_S1:");        
-  Serial.print(dists[1]);            
-  Serial.print(",");                 
-  
-  Serial.print("Right_S2:");         
-  Serial.print(dists[0]);            
-  
-  Serial.println();                  
   delay(30);                         
 
-  // --- LOGIC (KEPT EXACTLY AS YOU HAD IT) ---
+  // 3. YOUR ORIGINAL LOGIC
+  // (Note: If sensors fail now, they return 2000, so it won't run away)
+  
   if (dists[1] > 100 || 50 >= dists[1]) {
     forward();
     delay(50);
@@ -96,43 +126,4 @@ void loop() {
   else {
     stop();
   }
-}
-
-// --- COMMANDS (UPDATED WITH "MOTOR_SPEED" INSTEAD OF 100) ---
-
-void forward() {
-  analogWrite(INT1, MOTOR_SPEED); 
-  analogWrite(INT2, 0); 
-  analogWrite(INT3, 0);
-  analogWrite(INT4, MOTOR_SPEED);
-}
-
-void backward() {
-  analogWrite(INT1, 0);
-  analogWrite(INT2, MOTOR_SPEED);
-  analogWrite(INT3, MOTOR_SPEED);
-  analogWrite(INT4, 0);
-}
-
-void stop() {
-  analogWrite(INT1, 0);
-  analogWrite(INT2, 0);
-  analogWrite(INT3, 0);
-  analogWrite(INT4, 0);
-}
-
-void right() { 
-  analogWrite(INT1, MOTOR_SPEED); 
-  analogWrite(INT2, 0); 
-  analogWrite(INT3, MOTOR_SPEED); 
-  analogWrite(INT4, 0);
-  delay(1000);
-}
-
-void left() {  
-  analogWrite(INT1, 0); 
-  analogWrite(INT2, MOTOR_SPEED); 
-  analogWrite(INT3, 0); 
-  analogWrite(INT4, MOTOR_SPEED); 
-  delay(1000);
 }
